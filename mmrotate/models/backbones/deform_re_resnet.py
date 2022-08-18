@@ -14,6 +14,7 @@ from e2cnn import gspaces
 from e2cnn.nn import GeometricTensor
 from mmcv.cnn import constant_init
 from torch.nn.modules.batchnorm import _BatchNorm
+import warnings
 
 import torchvision.ops
 from ..builder import ROTATED_BACKBONES
@@ -619,8 +620,15 @@ class DeformReResNet(BaseModule):
                  init_cfg = [
                         dict(type='Kaiming', layer=['Conv2d']),
                         dict(type='Constant', val=1, layer=['_BatchNorm', 'GroupNorm'])
-                ]):
+                ],
+                pretrained=None):
         super(DeformReResNet, self).__init__(init_cfg)
+
+        if isinstance(pretrained, str):
+            warnings.warn('DeprecationWarning: pretrained is deprecated, '
+                        'please use "init_cfg" instead')
+            self.init_cfg = dict(type='Pretrained', checkpoint=pretrained)
+
         if depth not in self.arch_settings:
             raise KeyError(f'invalid depth {depth} for resnet')
         self.depth = depth
