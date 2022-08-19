@@ -313,6 +313,7 @@ class DeformReFPN(BaseModule):
                 conv_cfg=conv_cfg,
                 norm_cfg=norm_cfg if not self.no_norm_on_lateral else None,
                 activation=self.activation,
+                gspace=self.gspace,
                 inplace=False)
             up_sample = enn.R2Upsampling(l_conv.out_type, 2, mode='nearest', align_corners=False)
             fpn_conv = ConvModule(
@@ -323,6 +324,7 @@ class DeformReFPN(BaseModule):
                 conv_cfg=conv_cfg,
                 norm_cfg=norm_cfg,
                 activation=self.activation,
+                gspace=self.gspace,
                 inplace=False)
 
             self.lateral_convs.append(l_conv)
@@ -346,6 +348,7 @@ class DeformReFPN(BaseModule):
                     conv_cfg=conv_cfg,
                     norm_cfg=norm_cfg,
                     activation=self.activation,
+                    gspace=self.gspace,
                     inplace=False)
                 self.fpn_convs.append(extra_fpn_conv)
 
