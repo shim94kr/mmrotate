@@ -767,8 +767,7 @@ class DeformReResNet(BaseModule):
             res_layer = getattr(self, layer_name)
             x = res_layer(x)
             if i in self.out_indices:
-                outs.append(
-                    x.tensor if not self.with_geotensor else x)
+                outs.append(x)
         if len(outs) == 1:
             return outs[0]
         else:
