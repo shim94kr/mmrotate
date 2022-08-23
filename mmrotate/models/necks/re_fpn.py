@@ -2,14 +2,73 @@
 # Modified from csuhan: https://github.com/csuhan/ReDet
 import warnings
 
+import math
 import e2cnn.nn as enn
 import torch.nn as nn
 from mmcv.runner import BaseModule, auto_fp16
 
+from e2cnn import gspaces
 from ..builder import ROTATED_NECKS
-from ..utils import (build_enn_feature, build_enn_norm_layer, ennConv,
-                     ennInterpolate, ennMaxPool, ennReLU)
 
+def regular_feature_type(gspace: gspaces.GSpace, planes: int, fixparams: bool = False):
+    """ build a regular feature map with the specified number of channels"""
+    assert gspace.fibergroup.order() > 0
+
+    N = gspace.fibergroup.order()
+
+    if fixparams:
+        planes *= math.sqrt(N)
+
+    planes = planes / N
+    planes = int(planes)
+
+    return enn.FieldType(gspace, [gspace.regular_repr] * planes)
+
+
+def trivial_feature_type(gspace: gspaces.GSpace, planes: int, fixparams: bool = False):
+    """ build a trivial feature map with the specified number of channels"""
+
+    if fixparams:
+        planes *= math.sqrt(gspace.fibergroup.order())
+
+    planes = int(planes)
+    return enn.FieldType(gspace, [gspace.trivial_repr] * planes)
+
+
+FIELD_TYPE = {
+    "trivial": trivial_feature_type,
+    "regular": regular_feature_type,
+}
+
+
+def conv3x3(gspace, inplanes, out_planes, stride=1, padding=1, dilation=1, bias=False, fixparams=False):
+    """3x3 convolution with padding"""
+    in_type = FIELD_TYPE['regular'](gspace, inplanes, fixparams=fixparams)
+    out_type = FIELD_TYPE['regular'](gspace, out_planes, fixparams=fixparams)
+    return enn.R2Conv(in_type, out_type, 3,
+                      stride=stride,
+                      padding=padding,
+                      dilation=dilation,
+                      bias=bias,
+                      sigma=None,
+                      frequencies_cutoff=lambda r: 3 * r)
+
+
+def conv1x1(gspace, inplanes, out_planes, stride=1, padding=0, dilation=1, bias=False, fixparams=False):
+    """1x1 convolution"""
+    in_type = FIELD_TYPE['regular'](gspace, inplanes, fixparams=fixparams)
+    out_type = FIELD_TYPE['regular'](gspace, out_planes, fixparams=fixparams)
+    return enn.R2Conv(in_type, out_type, 1,
+                      stride=stride,
+                      padding=padding,
+                      dilation=dilation,
+                      bias=bias,
+                      sigma=None,
+                      frequencies_cutoff=lambda r: 3 * r)
+
+def build_norm_layer(gspace, num_features, postfix=''):
+    in_type = FIELD_TYPE['regular'](gspace, num_features)
+    return 'bn' + str(postfix), enn.InnerBatchNorm(in_type)
 
 class ConvModule(enn.EquivariantModule):
     """ConvModule.
@@ -51,12 +110,16 @@ class ConvModule(enn.EquivariantModule):
                  norm_cfg=None,
                  activation='relu',
                  inplace=False,
+                 gspace=None,
+                 fixparams=False,
                  order=('conv', 'norm', 'act')):
         super(ConvModule, self).__init__()
         assert conv_cfg is None or isinstance(conv_cfg, dict)
         assert norm_cfg is None or isinstance(norm_cfg, dict)
-        self.in_type = build_enn_feature(in_channels)
-        self.out_type = build_enn_feature(out_channels)
+        self.in_type = FIELD_TYPE['regular'](
+            gspace, in_channels, fixparams=fixparams)
+        self.out_type = FIELD_TYPE['regular'](
+            gspace, out_channels, fixparams=fixparams)
         self.conv_cfg = conv_cfg
         self.norm_cfg = norm_cfg
         self.activation = activation
@@ -75,15 +138,29 @@ class ConvModule(enn.EquivariantModule):
         if self.with_norm and self.with_bias:
             warnings.warn('ConvModule has norm and bias at the same time')
         # build convolution layer
-        self.conv = ennConv(
-            in_channels,
-            out_channels,
-            kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            groups=groups,
-            bias=bias)
+        if kernel_size == 1:
+            self.conv = conv1x1(
+                            gspace,
+                            in_channels,
+                            out_channels,
+                            stride=stride,
+                            padding=padding,
+                            dilation=dilation,
+                            bias=False,
+                            fixparams=fixparams)
+        elif kernel_size == 3:
+            self.conv = conv3x3(
+                            gspace,
+                            in_channels,
+                            out_channels,
+                            stride=stride,
+                            padding=padding,
+                            dilation=dilation,
+                            bias=False,
+                            fixparams=fixparams)
+        else:
+            NotImplementedError
+
         # export the attributes of self.conv to a higher level for convenience
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -104,7 +181,7 @@ class ConvModule(enn.EquivariantModule):
                 norm_channels = in_channels
             if conv_cfg is not None and conv_cfg['type'] == 'ORConv':
                 norm_channels = int(norm_channels * 8)
-            self.norm_name, norm = build_enn_norm_layer(norm_channels)
+            self.norm_name, norm = build_norm_layer(gspace, norm_channels)
             self.add_module(self.norm_name, norm)
 
         # build activation layer
@@ -114,7 +191,7 @@ class ConvModule(enn.EquivariantModule):
                 raise ValueError(
                     f'{self.activation} is currently not supported.')
             if self.activation == 'relu':
-                self.activate = ennReLU(out_channels)
+                self.activate = enn.ReLU(self.conv.out_type, inplace=True)
 
         # Use msra init by default
         self.init_weights()
@@ -146,7 +223,7 @@ class ConvModule(enn.EquivariantModule):
 
 
 @ROTATED_NECKS.register_module()
-class ReFPN(BaseModule):
+class DeformReFPN(BaseModule):
     """ReFPN.
 
     Args:
@@ -188,19 +265,29 @@ class ReFPN(BaseModule):
                  conv_cfg=None,
                  norm_cfg=None,
                  activation=None,
+                 orientation=8,
+                 flip = False,
+                 fixparams=False,
                  init_cfg=dict(
                      type='Xavier', layer='Conv2d', distribution='uniform')):
 
-        super(ReFPN, self).__init__()
+        super(DeformReFPN, self).__init__()
         assert isinstance(in_channels, list)
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.num_ins = len(in_channels)
         self.num_outs = num_outs
         self.activation = activation
+        self.orientation = orientation
+        self.fixparams = fixparams
         self.relu_before_extra_convs = relu_before_extra_convs
         self.no_norm_on_lateral = no_norm_on_lateral
         self.fp16_enabled = False
+        if flip == False:
+            self.gspace = gspaces.Rot2dOnR2(orientation)
+        else:
+            self.gspace = gspaces.FlipRot2dOnR2(orientation)
+
         if end_level == -1:
             self.backbone_end_level = self.num_ins
             assert num_outs >= self.num_ins - start_level
@@ -226,8 +313,9 @@ class ReFPN(BaseModule):
                 conv_cfg=conv_cfg,
                 norm_cfg=norm_cfg if not self.no_norm_on_lateral else None,
                 activation=self.activation,
+                gspace=self.gspace,
                 inplace=False)
-            up_sample = ennInterpolate(out_channels, 2)
+            up_sample = enn.R2Upsampling(l_conv.out_type, 2, mode='nearest', align_corners=False)
             fpn_conv = ConvModule(
                 out_channels,
                 out_channels,
@@ -236,6 +324,7 @@ class ReFPN(BaseModule):
                 conv_cfg=conv_cfg,
                 norm_cfg=norm_cfg,
                 activation=self.activation,
+                gspace=self.gspace,
                 inplace=False)
 
             self.lateral_convs.append(l_conv)
@@ -259,6 +348,7 @@ class ReFPN(BaseModule):
                     conv_cfg=conv_cfg,
                     norm_cfg=norm_cfg,
                     activation=self.activation,
+                    gspace=self.gspace,
                     inplace=False)
                 self.fpn_convs.append(extra_fpn_conv)
 
@@ -272,11 +362,11 @@ class ReFPN(BaseModule):
             if not self.add_extra_convs:
                 for i in range(self.num_outs - used_backbone_levels):
                     self.max_pools.append(
-                        ennMaxPool(out_channels, 1, stride=2))
+                        enn.PointwiseMaxPool(self.fpn_convs[-1].out_type, kernel_size=1, stride=2, padding=0))
             # add conv layers on top of original feature maps (RetinaNet)
             else:
                 for i in range(used_backbone_levels + 1, self.num_outs):
-                    self.relus.append(ennReLU(out_channels))
+                    self.relus.append(enn.ReLU(self.fpn_convs[-1].out_type, inplace=True))
 
     @auto_fp16()
     def forward(self, inputs):
