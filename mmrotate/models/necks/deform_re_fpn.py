@@ -362,11 +362,11 @@ class DeformReFPN(BaseModule):
             if not self.add_extra_convs:
                 for i in range(self.num_outs - used_backbone_levels):
                     self.max_pools.append(
-                        enn.PointwiseMaxPool(self.fpn_conv[-1].out_type, kernel_size=1, stride=2, padding=0))
+                        enn.PointwiseMaxPool(self.fpn_convs[-1].out_type, kernel_size=1, stride=2, padding=0))
             # add conv layers on top of original feature maps (RetinaNet)
             else:
                 for i in range(used_backbone_levels + 1, self.num_outs):
-                    self.relus.append(enn.ReLU(self.fpn_conv[-1].out_type, inplace=True))
+                    self.relus.append(enn.ReLU(self.fpn_convs[-1].out_type, inplace=True))
 
     @auto_fp16()
     def forward(self, inputs):
